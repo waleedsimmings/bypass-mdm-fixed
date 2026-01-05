@@ -340,15 +340,33 @@ select opt in "${options[@]}"; do
             echo "0.0.0.0 iprofiles.apple.com" >> "$SYSTEM_VOLUME/etc/hosts"
             echo -e "${GRN}Successfully blocked MDM & Profile Domains${NC}"
 
-            # Remove configuration profiles
+            # Remove configuration profiles and mark setup as done
             mkdir -p "$DATA_VOLUME/private/var/db"
             touch "$DATA_VOLUME/private/var/db/.AppleSetupDone"
             
+            # Also mark setup done in system volume
+            mkdir -p "$SYSTEM_VOLUME/var/db"
+            touch "$SYSTEM_VOLUME/var/db/.AppleSetupDone" 2>/dev/null || true
+            
+            # Disable setup assistants
+            mkdir -p "$DATA_VOLUME/private/var/db/.AppleSetupDone" 2>/dev/null || true
+            defaults write "$DATA_VOLUME/private/var/db/.AppleSetupDone" -bool true 2>/dev/null || true
+            
+            # Remove MDM configuration profiles
             mkdir -p "$SYSTEM_VOLUME/var/db/ConfigurationProfiles/Settings"
             rm -rf "$SYSTEM_VOLUME/var/db/ConfigurationProfiles/Settings/.cloudConfigHasActivationRecord"
             rm -rf "$SYSTEM_VOLUME/var/db/ConfigurationProfiles/Settings/.cloudConfigRecordFound"
             touch "$SYSTEM_VOLUME/var/db/ConfigurationProfiles/Settings/.cloudConfigProfileInstalled"
             touch "$SYSTEM_VOLUME/var/db/ConfigurationProfiles/Settings/.cloudConfigRecordNotFound"
+            
+            # Block additional MDM/enterprise enrollment domains
+            echo "0.0.0.0 enterprise.apple.com" >> "$SYSTEM_VOLUME/etc/hosts"
+            echo "0.0.0.0 gdmf.apple.com" >> "$SYSTEM_VOLUME/etc/hosts"
+            echo "0.0.0.0 albert.apple.com" >> "$SYSTEM_VOLUME/etc/hosts"
+            echo "0.0.0.0 ocsp.apple.com" >> "$SYSTEM_VOLUME/etc/hosts"
+            
+            # Ensure user can log in by setting up authentication
+            dscl -f "$dscl_path" localhost -create "/Local/Default/Users/$username" Password "*" 2>/dev/null || true
 
             echo -e "${GRN}MDM enrollment has been bypassed!${NC}"
             echo -e "${NC}Exit terminal and reboot your Mac.${NC}"
