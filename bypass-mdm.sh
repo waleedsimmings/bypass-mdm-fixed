@@ -288,8 +288,13 @@ select opt in "${options[@]}"; do
             # Create Users directory if it doesn't exist
             mkdir -p "$DATA_VOLUME/Users"
             
-            # Remove user if it already exists
+            # Completely remove user if it already exists (including home directory)
+            echo -e "${CYAN}Removing existing user if present...${NC}"
             dscl -f "$dscl_path" localhost -delete "/Local/Default/Users/$username" 2>/dev/null || true
+            rm -rf "$DATA_VOLUME/Users/$username" 2>/dev/null || true
+            # Remove from admin group
+            dscl -f "$dscl_path" localhost -delete "/Local/Default/Groups/admin" GroupMembership "$username" 2>/dev/null || true
+            sleep 1
             
             # Create user record step by step with error checking
             echo -e "${CYAN}Creating user record...${NC}"
@@ -298,6 +303,7 @@ select opt in "${options[@]}"; do
                 exit 1
             fi
             
+            # Set basic user properties BEFORE setting password
             dscl -f "$dscl_path" localhost -create "/Local/Default/Users/$username" UserShell "/bin/zsh"
             dscl -f "$dscl_path" localhost -create "/Local/Default/Users/$username" RealName "$realName"
             dscl -f "$dscl_path" localhost -create "/Local/Default/Users/$username" UniqueID "501"
@@ -309,37 +315,40 @@ select opt in "${options[@]}"; do
             
             dscl -f "$dscl_path" localhost -create "/Local/Default/Users/$username" NFSHomeDirectory "/Users/$username"
             
-            # Set password using multiple methods
+            # Set password BEFORE adding to admin group
             echo -e "${CYAN}Setting password...${NC}"
             
-            # Method 1: Try standard dscl passwd
+            # Set password - for a new user, we can set it directly
+            echo -e "${CYAN}Setting password...${NC}"
+            
+            # Method 1: Try dscl passwd (for new users, this should work without old password)
+            # The trick is to pipe the password twice (new password, confirm)
             password_set=false
-            if dscl -f "$dscl_path" localhost -passwd "/Local/Default/Users/$username" "$passw" 2>&1; then
-                # Check if it actually worked
+            
+            # Try the standard method first
+            if printf "%s\n%s\n" "$passw" "$passw" | dscl -f "$dscl_path" localhost -passwd "/Local/Default/Users/$username" 2>&1 | grep -vq "eDSOperationFailed\|Permission denied\|Error"; then
                 sleep 1
-                if dscl -f "$dscl_path" localhost -read "/Local/Default/Users/$username" AuthenticationAuthority 2>/dev/null | grep -q "."; then
+                # Verify password was set by checking AuthenticationAuthority
+                if dscl -f "$dscl_path" localhost -read "/Local/Default/Users/$username" AuthenticationAuthority 2>/dev/null | grep -q "ShadowHash\|Kerberos"; then
                     password_set=true
                     echo -e "${GRN}Password set successfully${NC}"
                 fi
             fi
             
-            # Method 2: If that failed, try using sysadminctl approach (create shadow hash)
+            # Method 2: If that failed, set up for password-less login
             if [ "$password_set" = false ]; then
-                echo -e "${YEL}Trying alternative password method...${NC}"
-                # Create shadow hash file manually
-                shadow_hash_dir="$DATA_VOLUME/private/var/db/dslocal/nodes/Default/users/$username.plist.d"
-                mkdir -p "$shadow_hash_dir"
+                echo -e "${YEL}Password setting had issues. Setting up account for flexible login...${NC}"
                 
-                # Try using pwpolicy or creating authentication authority
-                # For now, set AuthenticationAuthority to allow password-less login initially
+                # Remove AuthenticationAuthority to allow multiple login methods
                 dscl -f "$dscl_path" localhost -delete "/Local/Default/Users/$username" AuthenticationAuthority 2>/dev/null || true
                 
-                # Try passwd again with explicit path
-                echo "$passw" | dscl -f "$dscl_path" localhost -passwd "/Local/Default/Users/$username" - 2>&1 || true
+                # Try one more time with a simpler approach
+                echo "$passw" | dscl -f "$dscl_path" localhost -passwd "/Local/Default/Users/$username" - 2>&1 | grep -v "Permission denied" || true
                 
-                echo -e "${YEL}Password may need to be set after first login${NC}"
-                echo -e "${YEL}Try logging in with username: $username${NC}"
-                echo -e "${YEL}If password doesn't work, try leaving it blank or use: $passw${NC}"
+                echo -e "${YEL}Login options to try:${NC}"
+                echo -e "  1. Username: $username, Password: $passw"
+                echo -e "  2. Username: $username, Password: (leave blank, press Enter)"
+                echo -e "  3. Username: $username, Password: Apple (common default)"
             fi
             
             # Ensure user is in admin group
@@ -417,14 +426,21 @@ EOF
             echo -e "${GRN}MDM enrollment has been bypassed!${NC}"
             echo ""
             echo -e "${CYAN}Login Instructions:${NC}"
-            echo -e "${YEL}After reboot, try logging in with:${NC}"
+            echo -e "${YEL}After reboot, try these login methods IN ORDER:${NC}"
+            echo ""
+            echo -e "${GRN}Method 1 (try first):${NC}"
             echo -e "  Username: ${GRN}$username${NC}"
             echo -e "  Password: ${GRN}$passw${NC}"
             echo ""
-            echo -e "${YEL}If password doesn't work, try:${NC}"
-            echo -e "  1. Leave password blank and press Enter"
-            echo -e "  2. Click 'Local login' button if available"
-            echo -e "  3. Press Escape or Cmd+Q to dismiss Microsoft screen"
+            echo -e "${GRN}Method 2 (if Method 1 fails):${NC}"
+            echo -e "  Username: ${GRN}$username${NC}"
+            echo -e "  Password: ${YEL}(leave blank, just press Enter)${NC}"
+            echo ""
+            echo -e "${GRN}Method 3 (if still having issues):${NC}"
+            echo -e "  Click ${GRN}'Local login'${NC} button if available"
+            echo -e "  Or press ${GRN}Escape${NC} or ${GRN}Cmd+Q${NC} to dismiss Microsoft screen"
+            echo ""
+            echo -e "${YEL}If screen keeps flickering, the account may need password reset after first login${NC}"
             echo ""
             echo -e "${NC}Exit terminal and reboot your Mac.${NC}"
             break
