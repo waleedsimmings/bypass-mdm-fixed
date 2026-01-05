@@ -17,38 +17,74 @@ detect_volumes() {
     SYSTEM_VOLUME=""
     DATA_VOLUME=""
     
-    # Check all mounted volumes
+    # Function to check if volume should be skipped
+    should_skip_volume() {
+        local vol_name="$1"
+        # Skip Recovery and other system volumes
+        case "$vol_name" in
+            *"Recovery"*|*"Preboot"*|*"VM"*|*"macOS Base System"*|*"Update"*|*"com.apple"*)
+                return 0  # Should skip
+                ;;
+            *)
+                # Also check if it's a recovery volume by looking for installation files
+                if [ -f "/Volumes/$vol_name/System/Installation/Packages/OSInstall.mpkg" ]; then
+                    return 0  # Should skip (recovery volume)
+                fi
+                return 1  # Don't skip
+                ;;
+        esac
+    }
+    
+    # First pass: Find data volume (prioritize " - Data" volumes)
     for vol in /Volumes/*; do
         if [ -d "$vol" ] && [ "$vol" != "/Volumes" ]; then
             vol_name=$(basename "$vol")
-            # Skip Recovery and other system volumes
-            if [[ "$vol_name" == *"Recovery"* ]] || [[ "$vol_name" == *"Preboot"* ]] || [[ "$vol_name" == *"VM"* ]]; then
-                continue
-            fi
             
-            # System volume has /etc/hosts
-            if [ -f "$vol/etc/hosts" ]; then
-                SYSTEM_VOLUME="$vol"
-                echo -e "${GRN}Found system volume: $vol_name${NC}"
+            if should_skip_volume "$vol_name"; then
+                continue
             fi
             
             # Data volume has /private/var/db/dslocal
             if [ -d "$vol/private/var/db/dslocal" ]; then
-                DATA_VOLUME="$vol"
-                echo -e "${GRN}Found data volume: $vol_name${NC}"
+                # Prefer volumes with " - Data" suffix for APFS
+                if [[ "$vol_name" == *" - Data" ]]; then
+                    DATA_VOLUME="$vol"
+                    echo -e "${GRN}Found data volume: $vol_name${NC}"
+                    break  # Found the best candidate, stop looking
+                elif [ -z "$DATA_VOLUME" ]; then
+                    # Keep as candidate if no Data volume found yet
+                    DATA_VOLUME="$vol"
+                    echo -e "${GRN}Found data volume candidate: $vol_name${NC}"
+                fi
             fi
         fi
     done
     
-    # If we found a data volume but no system volume, try to find system volume by checking for /var/db/ConfigurationProfiles
+    # Second pass: Find system volume
+    # If we found a " - Data" volume, try to find its corresponding system volume first
+    if [ -n "$DATA_VOLUME" ]; then
+        data_name=$(basename "$DATA_VOLUME")
+        if [[ "$data_name" == *" - Data" ]]; then
+            base_name="${data_name% - Data}"
+            if [ -d "/Volumes/$base_name" ] && ! should_skip_volume "$base_name"; then
+                SYSTEM_VOLUME="/Volumes/$base_name"
+                echo -e "${GRN}Found system volume: $base_name${NC}"
+            fi
+        fi
+    fi
+    
+    # If we don't have a system volume yet, look for one with /etc/hosts
     if [ -z "$SYSTEM_VOLUME" ]; then
         for vol in /Volumes/*; do
             if [ -d "$vol" ] && [ "$vol" != "/Volumes" ]; then
                 vol_name=$(basename "$vol")
-                if [[ "$vol_name" == *"Recovery"* ]] || [[ "$vol_name" == *"Preboot"* ]] || [[ "$vol_name" == *"VM"* ]]; then
+                
+                if should_skip_volume "$vol_name"; then
                     continue
                 fi
-                if [ -d "$vol/var/db/ConfigurationProfiles" ]; then
+                
+                # System volume has /etc/hosts
+                if [ -f "$vol/etc/hosts" ]; then
                     SYSTEM_VOLUME="$vol"
                     echo -e "${GRN}Found system volume: $vol_name${NC}"
                     break
@@ -57,17 +93,50 @@ detect_volumes() {
         done
     fi
     
-    # If still no system volume, try the data volume's parent (for APFS volumes)
-    if [ -z "$SYSTEM_VOLUME" ] && [ -n "$DATA_VOLUME" ]; then
-        # For APFS, the data volume might be named "VolumeName - Data"
+    # For APFS volumes, if we found a " - Data" volume, find its corresponding system volume
+    if [ -n "$DATA_VOLUME" ]; then
         data_name=$(basename "$DATA_VOLUME")
         if [[ "$data_name" == *" - Data" ]]; then
             base_name="${data_name% - Data}"
             if [ -d "/Volumes/$base_name" ]; then
-                SYSTEM_VOLUME="/Volumes/$base_name"
-                echo -e "${GRN}Found system volume: $base_name${NC}"
+                # Verify it's not a recovery volume
+                skip=false
+                for skip_pattern in "${SKIP_VOLUMES[@]}"; do
+                    if [[ "$base_name" == *"$skip_pattern"* ]]; then
+                        skip=true
+                        break
+                    fi
+                done
+                if [ "$skip" = false ]; then
+                    SYSTEM_VOLUME="/Volumes/$base_name"
+                    echo -e "${GRN}Found system volume: $base_name${NC}"
+                fi
             fi
         fi
+    fi
+    
+    # If we still don't have a system volume, try finding by /var/db/ConfigurationProfiles
+    if [ -z "$SYSTEM_VOLUME" ]; then
+        for vol in /Volumes/*; do
+            if [ -d "$vol" ] && [ "$vol" != "/Volumes" ]; then
+                vol_name=$(basename "$vol")
+                skip=false
+                for skip_pattern in "${SKIP_VOLUMES[@]}"; do
+                    if [[ "$vol_name" == *"$skip_pattern"* ]]; then
+                        skip=true
+                        break
+                    fi
+                done
+                if [ "$skip" = true ]; then
+                    continue
+                fi
+                if [ -d "$vol/var/db/ConfigurationProfiles" ] && [ ! -d "$vol/System/Installation" ]; then
+                    SYSTEM_VOLUME="$vol"
+                    echo -e "${GRN}Found system volume: $vol_name${NC}"
+                    break
+                fi
+            fi
+        done
     fi
     
     if [ -z "$SYSTEM_VOLUME" ] || [ -z "$DATA_VOLUME" ]; then
