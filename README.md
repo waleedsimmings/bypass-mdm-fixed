@@ -14,10 +14,8 @@ This is a fixed version of the [bypass-mdm](https://github.com/assafdori/bypass-
 In Recovery Mode Terminal, run:
 
 ```bash
-curl https://raw.githubusercontent.com/YOUR_USERNAME/bypass-mdm-fixed/main/bypass-mdm.sh -o bypass-mdm.sh && chmod +x ./bypass-mdm.sh && ./bypass-mdm.sh
+curl https://raw.githubusercontent.com/waleedsimmings/bypass-mdm-fixed/main/bypass-mdm.sh -o bypass-mdm.sh && chmod +x ./bypass-mdm.sh && ./bypass-mdm.sh
 ```
-
-Replace `YOUR_USERNAME` with your GitHub username.
 
 ## Original Script
 
