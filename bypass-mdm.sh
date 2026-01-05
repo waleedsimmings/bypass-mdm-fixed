@@ -208,6 +208,38 @@ detect_volumes() {
     echo -e "${GRN}Using system volume: $SYSTEM_VOLUME${NC}"
     echo -e "${GRN}Using data volume: $DATA_VOLUME${NC}"
     echo ""
+    
+    # Ask user to confirm volumes
+    echo -e "${YEL}Please verify these are the correct volumes:${NC}"
+    echo -e "  System: $(basename "$SYSTEM_VOLUME")"
+    echo -e "  Data: $(basename "$DATA_VOLUME")"
+    echo ""
+    read -p "Are these correct? (y/n, default=y): " confirm_volumes
+    confirm_volumes="${confirm_volumes:=y}"
+    
+    if [[ ! "$confirm_volumes" =~ ^[Yy] ]]; then
+        echo -e "${YEL}Available volumes:${NC}"
+        ls -1 /Volumes/ | grep -v "^$"
+        echo ""
+        read -p "Enter system volume name (or full path): " system_input
+        read -p "Enter data volume name (or full path): " data_input
+        
+        if [[ "$system_input" == /* ]]; then
+            SYSTEM_VOLUME="$system_input"
+        else
+            SYSTEM_VOLUME="/Volumes/$system_input"
+        fi
+        
+        if [[ "$data_input" == /* ]]; then
+            DATA_VOLUME="$data_input"
+        else
+            DATA_VOLUME="/Volumes/$data_input"
+        fi
+        
+        echo -e "${GRN}Using system volume: $SYSTEM_VOLUME${NC}"
+        echo -e "${GRN}Using data volume: $DATA_VOLUME${NC}"
+    fi
+    echo ""
 }
 
 # Display header
