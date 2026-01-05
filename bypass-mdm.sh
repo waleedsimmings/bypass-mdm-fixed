@@ -309,28 +309,52 @@ select opt in "${options[@]}"; do
             
             dscl -f "$dscl_path" localhost -create "/Local/Default/Users/$username" NFSHomeDirectory "/Users/$username"
             
-            # Set password - in Recovery Mode, this sometimes fails but user creation still works
+            # Set password using multiple methods
             echo -e "${CYAN}Setting password...${NC}"
             
-            # Try to set password - if it fails, that's okay, user will be created without password
-            # and can be set on first boot or via passwd command
-            if dscl -f "$dscl_path" localhost -passwd "/Local/Default/Users/$username" "$passw" 2>&1 | grep -q "eDSOperationFailed"; then
-                echo -e "${YEL}Password setting returned error, but this is often normal in Recovery Mode${NC}"
-                echo -e "${YEL}The user account will be created. Password: $passw${NC}"
-                echo -e "${YEL}If login fails, you may need to reset password after first boot${NC}"
-            else
-                # Check if password was actually set by trying to verify
-                if dscl -f "$dscl_path" localhost -read "/Local/Default/Users/$username" Password 2>/dev/null | grep -q "."; then
-                    echo -e "${GRN}Password appears to be set${NC}"
-                else
-                    echo -e "${YEL}Password setting may have failed, but user account is created${NC}"
-                    echo -e "${YEL}Password to try: $passw${NC}"
+            # Method 1: Try standard dscl passwd
+            password_set=false
+            if dscl -f "$dscl_path" localhost -passwd "/Local/Default/Users/$username" "$passw" 2>&1; then
+                # Check if it actually worked
+                sleep 1
+                if dscl -f "$dscl_path" localhost -read "/Local/Default/Users/$username" AuthenticationAuthority 2>/dev/null | grep -q "."; then
+                    password_set=true
+                    echo -e "${GRN}Password set successfully${NC}"
                 fi
             fi
             
-            # Add to admin group
+            # Method 2: If that failed, try using sysadminctl approach (create shadow hash)
+            if [ "$password_set" = false ]; then
+                echo -e "${YEL}Trying alternative password method...${NC}"
+                # Create shadow hash file manually
+                shadow_hash_dir="$DATA_VOLUME/private/var/db/dslocal/nodes/Default/users/$username.plist.d"
+                mkdir -p "$shadow_hash_dir"
+                
+                # Try using pwpolicy or creating authentication authority
+                # For now, set AuthenticationAuthority to allow password-less login initially
+                dscl -f "$dscl_path" localhost -delete "/Local/Default/Users/$username" AuthenticationAuthority 2>/dev/null || true
+                
+                # Try passwd again with explicit path
+                echo "$passw" | dscl -f "$dscl_path" localhost -passwd "/Local/Default/Users/$username" - 2>&1 || true
+                
+                echo -e "${YEL}Password may need to be set after first login${NC}"
+                echo -e "${YEL}Try logging in with username: $username${NC}"
+                echo -e "${YEL}If password doesn't work, try leaving it blank or use: $passw${NC}"
+            fi
+            
+            # Ensure user is in admin group
             dscl -f "$dscl_path" localhost -append "/Local/Default/Groups/admin" GroupMembership "$username" 2>/dev/null || \
             dscl -f "$dscl_path" localhost -create "/Local/Default/Groups/admin" GroupMembership "$username" 2>/dev/null || true
+            
+            # Verify user account exists and is properly configured
+            echo -e "${CYAN}Verifying user account...${NC}"
+            if dscl -f "$dscl_path" localhost -read "/Local/Default/Users/$username" UniqueID >/dev/null 2>&1; then
+                echo -e "${GRN}User account verified${NC}"
+                echo -e "${CYAN}Account details:${NC}"
+                dscl -f "$dscl_path" localhost -read "/Local/Default/Users/$username" RealName UniqueID NFSHomeDirectory 2>/dev/null | head -5
+            else
+                echo -e "${RED}Warning: User account verification failed${NC}"
+            fi
             
             echo -e "${GRN}User created successfully${NC}"
 
@@ -359,16 +383,49 @@ select opt in "${options[@]}"; do
             touch "$SYSTEM_VOLUME/var/db/ConfigurationProfiles/Settings/.cloudConfigProfileInstalled"
             touch "$SYSTEM_VOLUME/var/db/ConfigurationProfiles/Settings/.cloudConfigRecordNotFound"
             
-            # Block additional MDM/enterprise enrollment domains
+            # Block additional MDM/enterprise enrollment domains (including Microsoft)
             echo "0.0.0.0 enterprise.apple.com" >> "$SYSTEM_VOLUME/etc/hosts"
             echo "0.0.0.0 gdmf.apple.com" >> "$SYSTEM_VOLUME/etc/hosts"
             echo "0.0.0.0 albert.apple.com" >> "$SYSTEM_VOLUME/etc/hosts"
             echo "0.0.0.0 ocsp.apple.com" >> "$SYSTEM_VOLUME/etc/hosts"
+            echo "0.0.0.0 login.microsoftonline.com" >> "$SYSTEM_VOLUME/etc/hosts"
+            echo "0.0.0.0 login.microsoft.com" >> "$SYSTEM_VOLUME/etc/hosts"
+            echo "0.0.0.0 account.microsoft.com" >> "$SYSTEM_VOLUME/etc/hosts"
             
-            # Ensure user can log in by setting up authentication
-            dscl -f "$dscl_path" localhost -create "/Local/Default/Users/$username" Password "*" 2>/dev/null || true
+            # Disable Microsoft/Office enrollment
+            mkdir -p "$DATA_VOLUME/Library/Preferences"
+            defaults write "$DATA_VOLUME/Library/Preferences/com.microsoft.office.plist" OfficeAutoSignIn -bool false 2>/dev/null || true
+            
+            # Ensure login window shows local users
+            mkdir -p "$DATA_VOLUME/Library/Preferences"
+            defaults write "$DATA_VOLUME/Library/Preferences/com.apple.loginwindow.plist" SHOWOTHERUSERS_MANAGED -bool false 2>/dev/null || true
+            defaults write "$DATA_VOLUME/Library/Preferences/com.apple.loginwindow.plist" SHOWFULLNAME -bool true 2>/dev/null || true
+            
+            # Create a plist to skip cloud account setup
+            mkdir -p "$DATA_VOLUME/private/var/db"
+            cat > "$DATA_VOLUME/private/var/db/.CloudSetupDone" << EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CloudSetupDone</key>
+    <true/>
+</dict>
+</plist>
+EOF
 
             echo -e "${GRN}MDM enrollment has been bypassed!${NC}"
+            echo ""
+            echo -e "${CYAN}Login Instructions:${NC}"
+            echo -e "${YEL}After reboot, try logging in with:${NC}"
+            echo -e "  Username: ${GRN}$username${NC}"
+            echo -e "  Password: ${GRN}$passw${NC}"
+            echo ""
+            echo -e "${YEL}If password doesn't work, try:${NC}"
+            echo -e "  1. Leave password blank and press Enter"
+            echo -e "  2. Click 'Local login' button if available"
+            echo -e "  3. Press Escape or Cmd+Q to dismiss Microsoft screen"
+            echo ""
             echo -e "${NC}Exit terminal and reboot your Mac.${NC}"
             break
             ;;
