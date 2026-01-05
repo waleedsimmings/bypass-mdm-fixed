@@ -171,6 +171,40 @@ detect_volumes() {
         exit 1
     fi
     
+    # Final verification - make sure we're not using recovery volumes
+    system_name=$(basename "$SYSTEM_VOLUME")
+    data_name=$(basename "$DATA_VOLUME")
+    
+    if should_skip_volume "$system_name"; then
+        echo -e "${RED}Error: Detected system volume appears to be a recovery volume: $system_name${NC}"
+        echo -e "${YEL}Please manually specify the correct volumes${NC}"
+        echo -e "${YEL}Available volumes:${NC}"
+        ls -1 /Volumes/ | grep -v "^$"
+        echo ""
+        read -p "Enter system volume name (or full path): " system_input
+        read -p "Enter data volume name (or full path): " data_input
+        
+        if [[ "$system_input" == /* ]]; then
+            SYSTEM_VOLUME="$system_input"
+        else
+            SYSTEM_VOLUME="/Volumes/$system_input"
+        fi
+        
+        if [[ "$data_input" == /* ]]; then
+            DATA_VOLUME="$data_input"
+        else
+            DATA_VOLUME="/Volumes/$data_input"
+        fi
+    fi
+    
+    # Verify the data volume has the required directory structure
+    if [ ! -d "$DATA_VOLUME/private/var/db/dslocal/nodes/Default" ] && [ ! -d "$DATA_VOLUME/var/db/dslocal/nodes/Default" ]; then
+        echo -e "${RED}Error: Data volume does not contain DirectoryService database${NC}"
+        echo -e "${YEL}Data volume path: $DATA_VOLUME${NC}"
+        echo -e "${YEL}Please verify this is the correct macOS data volume${NC}"
+        exit 1
+    fi
+    
     echo -e "${GRN}Using system volume: $SYSTEM_VOLUME${NC}"
     echo -e "${GRN}Using data volume: $DATA_VOLUME${NC}"
     echo ""
@@ -205,18 +239,68 @@ select opt in "${options[@]}"; do
             dscl_path="$DATA_VOLUME/private/var/db/dslocal/nodes/Default"
             echo -e "${GRN}Creating Temporary User${NC}"
             
+            # Verify dscl path exists
+            if [ ! -d "$dscl_path" ]; then
+                echo -e "${RED}Error: DirectoryService path not found: $dscl_path${NC}"
+                echo -e "${YEL}Trying to find correct path...${NC}"
+                # Try alternative path
+                if [ -d "$DATA_VOLUME/var/db/dslocal/nodes/Default" ]; then
+                    dscl_path="$DATA_VOLUME/var/db/dslocal/nodes/Default"
+                    echo -e "${GRN}Using alternative path: $dscl_path${NC}"
+                else
+                    echo -e "${RED}Error: Could not find DirectoryService database${NC}"
+                    exit 1
+                fi
+            fi
+            
             # Create Users directory if it doesn't exist
             mkdir -p "$DATA_VOLUME/Users"
             
-            dscl -f "$dscl_path" localhost -create "/Local/Default/Users/$username" 2>/dev/null || true
-            dscl -f "$dscl_path" localhost -create "/Local/Default/Users/$username" UserShell "/bin/zsh" 2>/dev/null || true
-            dscl -f "$dscl_path" localhost -create "/Local/Default/Users/$username" RealName "$realName" 2>/dev/null || true
-            dscl -f "$dscl_path" localhost -create "/Local/Default/Users/$username" UniqueID "501" 2>/dev/null || true
-            dscl -f "$dscl_path" localhost -create "/Local/Default/Users/$username" PrimaryGroupID "20" 2>/dev/null || true
+            # Remove user if it already exists
+            dscl -f "$dscl_path" localhost -delete "/Local/Default/Users/$username" 2>/dev/null || true
+            
+            # Create user record step by step with error checking
+            echo -e "${CYAN}Creating user record...${NC}"
+            if ! dscl -f "$dscl_path" localhost -create "/Local/Default/Users/$username"; then
+                echo -e "${RED}Error: Failed to create user record${NC}"
+                exit 1
+            fi
+            
+            dscl -f "$dscl_path" localhost -create "/Local/Default/Users/$username" UserShell "/bin/zsh"
+            dscl -f "$dscl_path" localhost -create "/Local/Default/Users/$username" RealName "$realName"
+            dscl -f "$dscl_path" localhost -create "/Local/Default/Users/$username" UniqueID "501"
+            dscl -f "$dscl_path" localhost -create "/Local/Default/Users/$username" PrimaryGroupID "20"
+            
+            # Create home directory
             mkdir -p "$DATA_VOLUME/Users/$username"
-            dscl -f "$dscl_path" localhost -create "/Local/Default/Users/$username" NFSHomeDirectory "/Users/$username" 2>/dev/null || true
-            dscl -f "$dscl_path" localhost -passwd "/Local/Default/Users/$username" "$passw" 2>/dev/null || true
-            dscl -f "$dscl_path" localhost -append "/Local/Default/Groups/admin" GroupMembership "$username" 2>/dev/null || true
+            chmod 755 "$DATA_VOLUME/Users/$username"
+            
+            dscl -f "$dscl_path" localhost -create "/Local/Default/Users/$username" NFSHomeDirectory "/Users/$username"
+            
+            # Set password - in Recovery Mode, this sometimes fails but user creation still works
+            echo -e "${CYAN}Setting password...${NC}"
+            
+            # Try to set password - if it fails, that's okay, user will be created without password
+            # and can be set on first boot or via passwd command
+            if dscl -f "$dscl_path" localhost -passwd "/Local/Default/Users/$username" "$passw" 2>&1 | grep -q "eDSOperationFailed"; then
+                echo -e "${YEL}Password setting returned error, but this is often normal in Recovery Mode${NC}"
+                echo -e "${YEL}The user account will be created. Password: $passw${NC}"
+                echo -e "${YEL}If login fails, you may need to reset password after first boot${NC}"
+            else
+                # Check if password was actually set by trying to verify
+                if dscl -f "$dscl_path" localhost -read "/Local/Default/Users/$username" Password 2>/dev/null | grep -q "."; then
+                    echo -e "${GRN}Password appears to be set${NC}"
+                else
+                    echo -e "${YEL}Password setting may have failed, but user account is created${NC}"
+                    echo -e "${YEL}Password to try: $passw${NC}"
+                fi
+            fi
+            
+            # Add to admin group
+            dscl -f "$dscl_path" localhost -append "/Local/Default/Groups/admin" GroupMembership "$username" 2>/dev/null || \
+            dscl -f "$dscl_path" localhost -create "/Local/Default/Groups/admin" GroupMembership "$username" 2>/dev/null || true
+            
+            echo -e "${GRN}User created successfully${NC}"
 
             # Block MDM domains
             echo "0.0.0.0 deviceenrollment.apple.com" >> "$SYSTEM_VOLUME/etc/hosts"
